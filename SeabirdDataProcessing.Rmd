@@ -1,0 +1,369 @@
+---
+title: 'Data Processing in R: <br/> Or, how to rid your workflow of Excel'
+author: "Jessica Luo"
+date: "March 10, 2015"
+output: ioslides_presentation
+---
+
+## A typical workflow
+
+- Acquire raw data
+- Open with Excel
+  - Examine the data, acquire some summary stats, generate initial plots
+  - Manipulate the spreadsheet, save "version_1.xls"
+- Import into stats software, performs stats
+
+
+- But you can do all of this in R!
+
+## Getting started
+
+```{r}
+# load libraries
+library(ggplot2)
+library(plyr)
+library(stringr)
+suppressWarnings(library(reshape2))
+suppressMessages(library(oce))
+# used these 'suppress' commands for a smoother presentation
+
+# read in dataset
+d <- read.csv("data/CAAL_Incubation/27_405_90186_201113.csv", 
+              header=T, stringsAsFactors=F)
+```
+- Note that you can use read.csv or read.table
+
+## Examining initial data frame
+
+```{r}
+head(d)
+```
+
+## Summary stats
+
+```{r}
+# can use range(), mean(), and summary() to examine your dataset
+range(d$Date)
+summary(d)
+```
+
+## Convert to dateTime format - POSIX
+
+```{r}
+# first use string concatenate to bind the strings together
+# str_c() is from the stringr package
+d$dateTime <- str_c(d$Date, d$Time)
+head(d$dateTime)
+# note that str_c() is not the same as c()
+```
+
+
+## Convert to dateTime format - POSIX
+
+```{r}
+# POSIX format will allow you to manipulate the dateTime
+?as.POSIXct
+d$dateTime <- as.POSIXct(d$dateTime, format="%Y/%m/%d %H:%M:%S", tz="UTC")
+head(d$dateTime)
+# can also calculate a "day of year"
+d$doy <- format(d$dateTime, "%j")
+head(d$doy)
+```
+
+
+## Renaming & removing columns
+
+```{r}
+# easy renaming from plyr package
+d <- rename(d, replace=c("Latitude"="lat", "Longitude"="lon"))
+names(d)
+# select columns to keep using subsetting and the c() command
+d <- d[,c("dateTime", "lat", "lon", "doy")]
+head(d)
+```
+
+## Calculating a distance measure
+```{r}
+?geodDist # from the oce package, dist in km
+# assume that the first lat, lon is the colony location
+d$dist_col <- geodDist(d$lat, d$lon, d$lat[1], d$lon[1])
+# note that we created a new column just by calling it
+```
+Alternatively -- can write a function:
+```{r}
+# Compute the straight line distance from the starting point of a lat,lon trajectory
+dist.from.start <- function(lat, lon) {
+  library("oce")
+  geodDist(lat1=lat, lon1=lon, lat2=na.omit(lat)[1], 
+           lon2=na.omit(lon)[1], alongPath=FALSE)
+}
+d$dist_col <- dist.from.start(d$lat, d$lon)
+head(d$dist_col)
+```
+
+## Examining the distance traveled
+
+```{r, fig.show='asis'}
+# initial plot (note: fig not cut off in R console)
+ggplot() + geom_point(aes(x=dateTime, y=dist_col), data=d)
+```
+
+## Keep only data where dist > 5 km
+
+```{r}
+d$speed <- NA
+d$trip_dur <- NA
+# use the which command to find the indices (row #s)
+# where the distance is over 5 km
+distOver5km <- which(d$dist_col >= 5)
+length(distOver5km) # how many indices
+head(distOver5km) # where does it start
+tail(distOver5km) # where does it end
+```
+
+## Keep only data where dist > 5 km
+
+```{r}
+first <- distOver5km[1]
+last <- distOver5km[length(distOver5km)]    
+
+# subsetting rows
+d <- d[first:last,]
+head(d)
+```
+
+## Keep only data where dist > 5 km
+
+```{r}
+first <- distOver5km[1]
+last <- distOver5km[length(distOver5km)]    
+
+# subsetting rows
+d <- d[first:last,]
+head(d)
+```
+
+## Calculate speed
+
+```{r}
+dist <- geodDist(d$lat, d$lon, alongPath=TRUE) # distance along a path   
+# diff() calculates a difference in value between two consecutive points
+# or you can set different lag values as well. default lag=1
+diffdist <- diff(dist) 
+head(diffdist)
+length(dist)
+length(diffdist)
+```
+
+## Calculate speed
+
+```{r}
+diff_time <- diff(d$dateTime) # distance along a path   
+head(diff_time) # still a POSIX format
+diff_time <- as.numeric(diff_time, units="hours") # change to numeric
+head(diff_time)
+speed <- c(0, diffdist/diff_time) # need to add a 0 to the beginning
+# now is the same length as our data frame
+d$speed <- speed
+```
+
+## Calculate trip duration
+```{r}
+?difftime # calculates a time difference b/t two times
+# for example:
+difftime(d$dateTime[2], d$dateTime[1])
+# also works on arrays
+difftime(d$dateTime[2:10], d$dateTime[1], units="hours")
+
+# so can apply this across the whole data frame
+d$trip_dur <- difftime(d$dateTime, d$dateTime[1], units = "hours")   
+# Note that none of this works if there are no trips over 5 km
+```
+
+## Use a conditional statement
+```{r}
+    if (length(distOver5km) != 0){
+      first <- distOver5km[1]
+      last <- distOver5km[length(distOver5km)]     
+      d <- d[first:last,]
+      # speed in km / hr
+      speed <- diff(geodDist(d$lat, d$lon, alongPath=TRUE))/
+        as.numeric(diff(d$dateTime), units="hours")
+      d$speed <- c(0, speed) 
+      d$trip_dur <- difftime(d$dateTime, d$dateTime[1], units = "hours")    
+    }
+
+  if(length(distOver5km) == 0){
+    # return an empty data fram with the same names and dimensions
+    names <- names(d)
+    # this starts a new blank data frame from an empty matrix
+    d <- data.frame(matrix(NA, ncol=length(names(d)), nrow=1))
+    names(d) <- names
+    } 
+```
+
+## And now, repeat x 20, or x 200
+To repeat this process there are a couple different ways:
+
+> *for()* loops:  
+- Read in names for each of the files  
+- Loop through the names, and apply the same procedure to each  
+- Bind all the rows together at each step <br>   
+> *plyr* package has *adply()*  
+- *plyr* uses the split-apply-combine strategy  
+- For this problem, we are splitting the "list" (array) of filenames  
+- Apply a function (*read.csv*, and all other processes)  
+- Then combine it all together
+
+## Demonstration with *adply()*
+```{r}
+# load data
+raw_data <- "data/CAAL_incubation"
+files <- list.files(raw_data, full=T)
+
+d <- adply(files, 1, function(file){
+  d <- read.csv(file)
+  # pull the band number out of the file name
+  d$band <- str_sub(file, -16, -12)
+
+  d <- rename(d, replace=c("Latitude" = "lat", "Longitude"="lon"))
+  
+  d$lonn <- ifelse(d$lon < 0, d$lon + 360, d$lon)
+  
+  # create a proper datetime
+  d$dateTime <- as.POSIXct(strptime(str_c(d$Date, d$Time), format="%Y/%m/%d %H:%M:%S", tz="UTC"))
+  
+  # "day of year" and "time of day" becomes unnecesary with a proper dateTime that R can recognize and manipulate, but we can still calculate these terms
+  d$doy <- format(d$dateTime, "%j")
+  # time of day a little harder to calculate so leaving it for now
+  
+  d$dist_col <- dist.from.start(d$lat, d$lon)
+  d <- d[, c("dateTime", "lat", "lon", "lonn", "band", "dist_col", "doy")]
+  d$speed <- NA
+  d$trip_dur <- NA
+  # cut off points - trips are defined as anything > 5 km from nest site
+  # demonstrate usage of "which"
+  temp <- which(d$dist_col >= 5)
+  if (length(temp) != 0){
+    first <- temp[1]
+    last <- temp[length(temp)]    
+    # subsetting
+    d <- d[first:last,]
+    
+    # speed in km / hr
+    speed <- diff(geodDist(d$lat, d$lon, alongPath=TRUE))/as.numeric(diff(d$dateTime), units="hours")
+    d$speed <- c(0, speed) 
+    
+    d$trip_dur <- difftime(d$dateTime, d$dateTime[1], units = "hours")    
+    }
+  if(length(temp) == 0){
+    names <- names(d)
+    d <- data.frame(matrix(NA, ncol=length(names(d)), nrow=1))
+    names(d) <- names} 
+  
+  return(d)
+  
+}, .progress="text")
+
+# remove adply column
+d <- d[,-1]
+d <- d[complete.cases(d),]
+row.names(d) <- 1:nrow(d)
+
+d$dateTime <- as.POSIXct(d$dateTime, origin = "1970-01-01 00:00.00", tz="UTC")
+write.csv(d, "CAAL_incubation_set1.csv", row.names=F)
+```
+
+## Demonstration with *for()* loops
+```{r}
+# load data
+raw_data <- "data/CAAL_incubation"
+files <- list.files(raw_data, full=T)
+
+d <- NULL
+
+for (i in 1:length(files)){
+  x <- read.csv(files[i])
+  # pull the band number out of the file name
+  x$band <- str_sub(files[i], -16, -12)
+  
+  names(x)[3] <- "lat"
+  names(x)[4] <- "lon"
+  
+  x$lonn <- ifelse(x$lon < 0, x$lon + 360, x$lon)
+  
+  # create a proper datetime
+  x$dateTime <- as.POSIXct(strptime(str_c(x$Date, x$Time), format="%Y/%m/%d %H:%M:%S", tz="UTC"))
+  
+  # "day of year" and "time of day" becomes unnecesary with a proper dateTime that R can recognize and manipulate, but we can still calculate these terms
+  x$doy <- format(x$dateTime, "%j")
+  # time of day a little harder to calculate so leaving it for now
+  
+  x$dist_col <- dist.from.start(x$lat, x$lon)
+  x <- x[, c("dateTime", "lat", "lon", "lonn", "band", "dist_col", "doy")]
+  x$speed <- NA
+  x$trip_dur <- NA
+  # cut off points - trips are defined as anything > 5 km from nest site
+  # demonstrate usage of "which"
+  temp <- which(x$dist_col >= 5)
+  if (length(temp) != 0){
+    first <- temp[1]
+    last <- temp[length(temp)]    
+    # subsetting
+    x <- x[first:last,]
+    
+    # speed in km / hr
+    speed <- diff(geodDist(x$lat, x$lon, alongPath=TRUE))/as.numeric(diff(x$dateTime), units="hours")
+    x$speed <- c(0, speed) 
+    
+    x$trip_dur <- difftime(x$dateTime, x$dateTime[1], units = "hours")    
+  }
+  if(length(temp) == 0){
+    names <- names(x)
+    x <- data.frame(matrix(NA, ncol=length(names(x)), nrow=1))
+    names(x) <- names} 
+
+  # bind together
+  d <- rbind(d, x)
+}
+
+d <- d[complete.cases(d),]
+row.names(d) <- 1:nrow(d)
+
+d$dateTime <- as.POSIXct(d$dateTime, origin = "1970-01-01 00:00.00", tz="UTC")
+
+write.csv(d, "CAAL_incubation_set1.csv", row.names=F)
+```
+
+
+## A few nifty *dplyr* functions
+```{r, tidy=T}
+suppressMessages(library(dplyr))
+
+d <- tbl_df(d) # dplyr format, data frame table
+# easy way to quickly look at d without typing (head(d))
+d 
+```
+
+## A few nifty *dplyr* functions
+```{r}
+# dplyr summarize for summary stats
+d %>% group_by(band) %>% summarize(counts = n(), 
+      mean.dcol = mean(dist_col), mean.spd = mean(speed))
+```
+
+## A few ggplot2 plots
+```{r, echo=F}
+d <- data.frame(d)
+data(coastlineWorld) # oce package
+coastline.world=data.frame(lon=coastlineWorld[["longitude"]],lat=coastlineWorld[["latitude"]]) 
+coastline.world$lonn <- ifelse(coastline.world$lon < 0, coastline.world$lon+360 , coastline.world$lon)
+```
+```{r}
+suppressWarnings(ggplot(mapping=aes(x=lonn, y=lat)) + geom_point(aes(colour=band), data=d) + geom_path(data=coastline.world) + theme_bw() + scale_x_continuous(limits=c(100, 220)) + scale_y_continuous(limits=c(-80, 0)))
+```
+
+## A few ggplot2 plots
+```{r}
+suppressWarnings(ggplot(mapping=aes(x=lonn, y=lat)) + geom_point(aes(alpha=rev(speed), size=rev(speed)), data=d) + geom_path(data=coastline.world) + theme_bw() + scale_x_continuous(limits=c(100, 220)) + scale_y_continuous(limits=c(-80, 0)))
+```
